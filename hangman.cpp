@@ -1,18 +1,21 @@
-#include "helper_functions/helpers.h" // Sertakan file header Anda
+#include "helper_functions/helpers.h"
 #include <cctype>
 #include <iostream>
 #include <string>
 
-// --- Program Utama ---
 int main()
 {
-    std::string kataRahasia = pilihKataAcak();
-    if (kataRahasia.empty()) { return 1; }
+    // variable initialization
+    const std::string kataRahasia = pilihKataAcak();
+    if (kataRahasia.empty()) {
+        return 1;
+    } // if there are no string detected, return error
 
-    // --- PERBAIKAN: Inisialisasi progres dengan mempertimbangkan spasi ---
     std::string progresTebakan = "";
     for (char c: kataRahasia) {
-        if (c == ' ') { progresTebakan += ' '; }
+        if (c == ' ') {
+            progresTebakan += ' ';
+        } // add spacing for more than one word
         else {
             progresTebakan += '_';
         }
@@ -21,48 +24,47 @@ int main()
     std::string tebakanSalah = "";
     std::string semuaTebakan = "";
     int jumlahKesalahan = 0;
-    const int maksKesalahan = 6;
+    constexpr int maksKesalahan = 6;
 
-    // Loop berjalan selama permainan BELUM berakhir (belum menang DAN belum
-    // kalah)
+    // game logic
     while (jumlahKesalahan < maksKesalahan && progresTebakan != kataRahasia) {
-        printStatus(progresTebakan, tebakanSalah, jumlahKesalahan);
+        printTerminal(progresTebakan, tebakanSalah, jumlahKesalahan);
 
+        // prompt the user to guess a char
         std::cout << "\nTebak satu huruf: ";
-        char tebakan;
+        char tebakan = ' ';
         std::cin >> tebakan;
-        tebakan = std::tolower(tebakan);
+        tebakan = std::tolower(tebakan); // ignore uppercase
 
-        // Menambahkan spasi ke tebakan yang sudah ada agar tidak bisa ditebak
+        // input validation
         if (!std::isalpha(tebakan)
             || semuaTebakan.find(tebakan) != std::string::npos) {
-            continue;
+            continue; // if it's not an alphabet or it's already inputted
+                      // before, then ignore
         }
-        semuaTebakan += tebakan;
+        semuaTebakan += tebakan; // add the user's guess
 
+        // processing the user's guess
         if (kataRahasia.find(tebakan) != std::string::npos) {
             for (size_t i = 0; i < kataRahasia.length(); ++i) {
                 if (kataRahasia[i] == tebakan) { progresTebakan[i] = tebakan; }
             }
-        }
+        } // if the guess is right, displays the correct location
         else {
             jumlahKesalahan++;
-            tebakanSalah += tebakan;
-            tebakanSalah += ' ';
-        }
+            tebakanSalah += std::string(1, tebakan) + ' ';
+        } // if the guess is wrong, increment the jumlahKesalahan and displays
+          // the wrong guess
     }
+    printTerminal(progresTebakan, tebakanSalah, jumlahKesalahan);
 
-    // --- Logika Akhir Permainan (Setelah Loop Selesai) ---
-    // Pertama, tampilkan status terakhir dari papan permainan
-    printStatus(progresTebakan, tebakanSalah, jumlahKesalahan);
-
-    // Sekarang, periksa MENGAPA loop berakhir
+    // check the loop termination condition
     if (progresTebakan == kataRahasia) {
-        // Jika loop berakhir karena kata sudah benar
+        // if the loop terminated because the guesses are correct
         std::cout << "\nSelamat! Anda berhasil menebak katanya! 🎉\n";
     }
     else {
-        // Jika loop berakhir karena kesalahan sudah maksimal
+        // if the loop terminated because the guesses are incorrect
         std::cout << "\nGAME OVER! 🚹 Anda gagal menebak kata.\n";
         std::cout << "Kata yang benar adalah: " << kataRahasia << std::endl;
     }
