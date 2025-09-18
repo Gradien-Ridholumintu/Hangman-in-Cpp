@@ -2,7 +2,14 @@
 #include <string>
 
 // function declaration
-std::string pilihKataAcak();
+// UI function
+void clearTerminal();
+void displayMainMenu();
+int selectLevel();
+bool displayEndScreen();
+// main function
+void playGame(const int& level);
+std::string selectRandomWord();
 void printHangman(int& jumlahKesalahan);
-void printTerminal(const std::string& progresTebakan,
-                   const std::string& tebakanSalah, int& jumlahKesalahan);
+void displayGame(const std::string& progresTebakan,
+                 const std::string& tebakanSalah, int& jumlahKesalahan);
