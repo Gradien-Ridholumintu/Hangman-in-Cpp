@@ -4,13 +4,16 @@
 
 int main()
 {
-    int gameState = 0;
+    initializeDatabase();
+    int gameState = 0; // 0 = Homescreen, 1 = Playing, 2 = Quitting
 
     while (gameState != 2) {
-        if (gameState == 0) { // main menu
-            displayMainMenu();
-            int pilihanUser;
-            std::cin >> pilihanUser;
+        if (gameState == 0) {
+            std::vector<scoreEntry> leaderboard = getLeaderboard();
+            displayMainMenu(leaderboard);
+
+            int pilihanMainMenu;
+            std::cin >> pilihanMainMenu;
             std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
                             '\n'); // clear input buffer
 
@@ -19,24 +22,37 @@ int main()
                 continue; // restart the loop if the user input non-int
             }
 
-            if (pilihanUser == 1) {
+            if (pilihanMainMenu == 1) {
                 gameState = 1; // play the game
             }
-            else if (pilihanUser == 2) {
+            else if (pilihanMainMenu == 2) {
                 gameState = 2; // quit the game
             }
         }
 
-        if (gameState == 1) { // playing state
-            const int level = selectLevel();
-            playGame(level);
+        if (gameState == 1) {
+            std::string username = getUsername();
+            bool mainLagi = true;
 
-            if (displayEndScreen()) {
-                gameState = 0; // back to main menu
+            while (mainLagi) { // Loop  jika user ingin bermain lagi
+                const int level = selectLevel();
+                int skorRonde = playGame(level);
+                int totalSkor = 0;
+
+                // update the score in the database
+                if (skorRonde > 0) {
+                    totalSkor = updateScore(username, skorRonde);
+                }
+
+                int pilihanEndScreen
+                        = displayEndScreen(username, skorRonde, totalSkor);
+                if (pilihanEndScreen == 1) { mainLagi = true; }
+                else {
+                    mainLagi = false;
+                }
             }
-            else {
-                gameState = 2; // quit the game
-            }
+            // back to main menu
+            gameState = 0;
         }
     }
 
