@@ -1,20 +1,27 @@
 #include "helpers.h"
 #include "sqlite3.h"
 #include <cctype>
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <random>
+#include <thread>
 #include <vector>
+
+using namespace std::chrono_literals;
+
+// The path to the database file.
+const char* DB_PATH = "../sqlite/hangman.db";
 
 // function definition
 
 void initializeDatabase()
 {
     sqlite3* db;
-    sqlite3_open("sqlite/hangman.db", &db); // open/create the database
+    sqlite3_open(DB_PATH, &db); // open/create the database
 
     const char* createDaftarKata = "CREATE TABLE IF NOT EXISTS DaftarKata("
-                                   "ID INT PRIMARY KEY AUTOINCREMENT,"
+                                   "ID INTEGER PRIMARY KEY AUTOINCREMENT,"
                                    "Kata TEXT NOT NULL UNIQUE,"
                                    "Panjang INT NOT NULL);";
     sqlite3_exec(db, createDaftarKata, nullptr, nullptr, nullptr);
@@ -30,7 +37,7 @@ void initializeDatabase()
 std::vector<scoreEntry> getLeaderboard()
 {
     sqlite3* db;
-    sqlite3_open("sqlite/hangman.db", &db);
+    sqlite3_open(DB_PATH, &db);
     std::vector<scoreEntry> leaderboard;
     // sql query to select the top 6 entries from the descending leaderboard
     const char* sql
@@ -57,7 +64,7 @@ std::vector<scoreEntry> getLeaderboard()
 int updateScore(const std::string& nama, const int& skor)
 {
     sqlite3* db;
-    sqlite3_open("sqlite/hangman.db", &db);
+    sqlite3_open(DB_PATH, &db);
     sqlite3_stmt* stmt;
 
     // retrieve the already stored scores
@@ -135,27 +142,32 @@ std::string getUsername()
 
 int selectLevel()
 {
-    clearTerminal();
-    std::cout << "\n--- PILIH TINGKAT KESULITAN ---\n";
-    std::cout << "  1. Mudah (<7 huruf)\n";
-    std::cout << "  2. Sedang (7-10 huruf)\n";
-    std::cout << "  3. Sulit (>10 huruf)\n\n";
-
     while (true) {
+        clearTerminal();
+        std::cout << "\n--- PILIH TINGKAT KESULITAN ---\n";
+        std::cout << "  1. Mudah (<7 huruf)\n";
+        std::cout << "  2. Sedang (7-10 huruf)\n";
+        std::cout << "  3. Sulit (>10 huruf)\n\n";
         std::cout << "Pilihan Anda (1-3): ";
+
         int pilihan = 0;
         std::cin >> pilihan;
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                        '\n'); // clear input buffer
+
         if (std::cin.fail()) {
             std::cin.clear(); // reset cin state
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
+                            '\n'); // clear input buffer
             std::cout << "Input tidak valid. Masukkan angka.\n";
+            std::this_thread::sleep_for(1s); // jeda 1 deitk
             continue; // restart the loop if the user input non-int
         }
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
+                        '\n'); // clear input buffer
         if (pilihan >= 1 && pilihan <= 3) { return pilihan; }
         // prompt the user to input difficulty again if the user input is not
         // valid
         std::cout << "Pilihan tidak valid. Coba lagi.\n";
+        std::this_thread::sleep_for(1s); // jeda 1 deitk
     }
 }
 
@@ -163,29 +175,33 @@ int displayEndScreen(const std::string& username, const int& currentScore,
                      const int& totalScore)
 {
     std::cout << "\nTekan Enter untuk melanjutkan...";
-
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
                     '\n'); // clear input buffer
 
-    clearTerminal();
-    std::cout << "\n--- PERMAINAN SELESAI ---\n";
-    std::cout << "Pemain: " << username << "\n";
-    std::cout << "Skor ronde ini: " << currentScore << '\n';
-    std::cout << "Skor Total Anda: " << totalScore << "\n\n";
-    std::cout << "  1. Main Lagi\n";
-    std::cout << "  2. Kembali ke Menu Utama\n\n";
-
     while (true) {
+        clearTerminal();
+        std::cout << "\n--- PERMAINAN SELESAI ---\n";
+        std::cout << "Pemain: " << username << "\n";
+        std::cout << "Skor ronde ini: " << currentScore << '\n';
+        std::cout << "Skor Total Anda: " << totalScore << "\n\n";
+        std::cout << "  1. Main Lagi\n";
+        std::cout << "  2. Kembali ke Menu Utama\n\n";
         std::cout << "Pilihan Anda (1-2): ";
+
         int pilihan;
         std::cin >> pilihan;
+
+        if (std::cin.fail()) {
+            std::cin.clear();
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
+                            '\n'); // clear input buffer
+            std::cout << "Input tidak valid. Masukkan angka.\n";
+            std::this_thread::sleep_for(1s); // jeda 1 deitk
+            continue;
+        }
+
         std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
                         '\n'); // clear input buffer
-        if (std::cin.fail()) {
-            std::cin.clear(); // reset cin state
-            std::cout << "Input tidak valid. Masukkan angka.\n";
-            continue; // restart the loop if the user input non-int
-        }
         if (pilihan == 1) { return true; }
         if (pilihan == 2) { return false; }
     }
@@ -194,9 +210,17 @@ int displayEndScreen(const std::string& username, const int& currentScore,
 std::string selectRandomWord(const int& level)
 {
     sqlite3* db;
-    sqlite3_open("sqlite/hangman.db", &db);
-    std::vector<std::string> kataSesuaiLevel;
+    int rc = sqlite3_open(DB_PATH, &db);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Cannot open database: " << sqlite3_errmsg(db)
+                  << std::endl;
+        std::cerr << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/'."
+                  << std::endl;
+        std::this_thread::sleep_for(3s);
+        return "";
+    }
 
+    std::vector<std::string> kataSesuaiLevel;
     std::string sql_query;
     // create sql query based on the selected difficulty
     switch (level) {
@@ -213,7 +237,14 @@ std::string selectRandomWord(const int& level)
     }
 
     sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(db, sql_query.c_str(), -1, &stmt, nullptr);
+    rc = sqlite3_prepare_v2(db, sql_query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db)
+                  << std::endl;
+        sqlite3_close(db);
+        std::this_thread::sleep_for(3s);
+        return "";
+    }
 
     // loop the query and return the rows
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -226,6 +257,7 @@ std::string selectRandomWord(const int& level)
     if (kataSesuaiLevel.empty()) {
         std::cerr << "Error: Tidak ada kata yang sesuai dengan tingkat "
                      "kesulitan yang dipilih di database.\n";
+        std::this_thread::sleep_for(2s);
         return ""; // throws error when there are no words filtered in
                    // accordance to the selected difficulty
     }
@@ -251,7 +283,7 @@ void printHangman(const int& jumlahKesalahan)
 }
 
 void displayGame(const std::string& progresTebakan,
-                 const std::string& tebakanSalah, int& jumlahKesalahan)
+                 const std::string& tebakanSalah, const int& jumlahKesalahan)
 {
     clearTerminal();
     std::cout << "\n--- Hangman ---\n";
