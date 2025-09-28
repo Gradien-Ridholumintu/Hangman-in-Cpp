@@ -1,60 +1,403 @@
 #include "helpers.h"
 #include "sqlite3.h"
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <iostream>
 #include <limits>
 #include <random>
+#include <sstream>
 #include <thread>
 #include <vector>
+// library for windows console handling
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
+// for sleep
 using namespace std::chrono_literals;
 
-// The path to the database file.
-const char* DB_PATH = "../sqlite/hangman.db";
+namespace {
+    bool isLastGamewin = false; // track last game outcome
 
-// function definition
+    // color helpers
+    constexpr auto RESET = "\x1b[0m";
+    constexpr auto BOLD = "\x1b[1m";
+    constexpr auto RED = "\x1b[31m";
+    constexpr auto GREEN = "\x1b[32m";
+    constexpr auto YELLOW = "\x1b[33m";
+    constexpr auto MAGENTA = "\x1b[35m";
+    constexpr auto CYAN = "\x1b[36m";
+    constexpr auto WHITE = "\x1b[97m";
+
+    // width for centering
+    constexpr int WIDTH = 80;
+    int consoleWidth()
+    {
+#ifdef _WIN32
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE),
+                                       &info)) {
+            return (info.srWindow.Right - info.srWindow.Left + 1);
+        }
+#endif
+        return WIDTH;
+    }
+
+    std::string centerLine(const std::string& text, int width)
+    {
+        if (width <= 0) width = consoleWidth();
+        if (static_cast<int>(text.size()) >= width) return text;
+        const int totalPad = width - static_cast<int>(text.size());
+        const int left = totalPad / 2;
+        const int right = totalPad - left;
+        return std::string(left, ' ') + text + std::string(right, ' ');
+    }
+    std::string centerLine(const std::string& text)
+    {
+        return centerLine(text, consoleWidth());
+    }
+
+    int computeLeftPad(const std::vector<std::string>& lines, int width)
+    {
+        size_t maxLen = 0;
+        for (const auto& l: lines) maxLen = std::max(maxLen, l.size());
+        int pad = (width - static_cast<int>(maxLen));
+        if (pad < 0) pad = 0;
+        return pad / 2;
+    }
+
+    void printBlockUnitCentered(const std::vector<std::string>& lines,
+                                const char* color = RESET, int width = -1)
+    {
+        if (width <= 0) width = consoleWidth();
+        int left = computeLeftPad(lines, width);
+        std::string indent(left, ' ');
+        for (const auto& line: lines) {
+            std::cout << color << indent << line << RESET << '\n';
+        }
+    }
+
+    void printCenteredBlock(const std::string& block, const char* color = RESET,
+                            int width = -1)
+    {
+        std::istringstream iss(block);
+        std::string line;
+        std::vector<std::string> lines;
+        while (std::getline(iss, line)) lines.push_back(line);
+        printBlockUnitCentered(lines, color, width);
+    }
+
+    void printPrompt(const std::string& text, const char* color = BOLD)
+    {
+        int width = consoleWidth();
+        int left = (width - static_cast<int>(text.size())) / 2;
+        if (left < 0) left = 0;
+        std::cout << color << std::string(left, ' ') << text << RESET;
+    }
+
+    auto TITLE_ASCII =
+        " _                                             \n"
+        "| |                                             \n"
+        "| |__   __ _ _ __   __ _ _ __ ___   __ _ _ __  \n"
+        "| '_ \\ / _` | '_ \\ / _` | '_ ` _ \\ / _` | '_ \\ \n"
+        "| | | | (_| | | | | (_| | | | | | | (_| | | | |\n"
+        "|_| |_|\\__,_|_| |_|\\__, |_| |_| |_|\\__,_|_| |_|\n"
+        "                    __/ |                      \n"
+        "                   |___/                       ";
+
+    // database helpers
+    std::string path(const std::string& a, const std::string& b)
+    {
+#ifdef _WIN32
+        const char sep = '\\';
+#else
+        const char sep = '/';
+#endif
+        if (a.empty()) return b;
+        if (a.back() == sep) return a + b;
+        return a + sep + b;
+    }
+
+    std::string executableDirectory()
+    {
+#ifdef _WIN32
+        char buffer[MAX_PATH];
+        DWORD len = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+        if (len > 0) {
+            std::string full(buffer, buffer + len);
+            size_t pos = full.find_last_of("/\\");
+            if (pos != std::string::npos) return full.substr(0, pos);
+            return full;
+        }
+#endif
+        return ".";
+    }
+
+    int openDb(sqlite3** db, std::string& outPath)
+    {
+        std::vector<std::string> candidates;
+        const std::string ed = executableDirectory();
+        candidates.push_back(
+                path(path(ed, ".."), path("sqlite", "hangman.db")));
+        candidates.push_back(path(ed, path("sqlite", "hangman.db")));
+        candidates.push_back(path(".", path("sqlite", "hangman.db")));
+        candidates.push_back(path("..", path("sqlite", "hangman.db")));
+
+        for (const auto& path: candidates) {
+            if (sqlite3_open(path.c_str(), db) == SQLITE_OK) {
+                outPath = path;
+                return SQLITE_OK;
+            }
+            if (*db) {
+                sqlite3_close(*db);
+                *db = nullptr;
+            }
+        }
+        return SQLITE_CANTOPEN;
+    }
+
+    void importDb(sqlite3* db)
+    {
+        const char* createDaftarKata = "CREATE TABLE IF NOT EXISTS DaftarKata("
+                                       "ID INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                       "Kata TEXT NOT NULL UNIQUE,"
+                                       "Panjang INT NOT NULL);";
+        sqlite3_exec(db, createDaftarKata, nullptr, nullptr, nullptr);
+
+        const char* createLeaderboard
+                = "CREATE TABLE IF NOT EXISTS Leaderboard("
+                  "Nama TEXT PRIMARY KEY,"
+                  "Skor INT NOT NULL);";
+        sqlite3_exec(db, createLeaderboard, nullptr, nullptr, nullptr);
+
+        sqlite3_stmt* stmt = nullptr;
+        bool hasPanjang = false;
+        if (sqlite3_prepare_v2(db, "PRAGMA table_info(DaftarKata);", -1, &stmt,
+                               nullptr)
+            == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* name = sqlite3_column_text(stmt, 1);
+                if (name
+                    && std::string(reinterpret_cast<const char*>(name))
+                               == "Panjang") {
+                    hasPanjang = true;
+                    break;
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (!hasPanjang) {
+            sqlite3_exec(db, "ALTER TABLE DaftarKata ADD COLUMN Panjang INT;",
+                         nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "UPDATE DaftarKata SET Panjang = LENGTH(Kata);",
+                         nullptr, nullptr, nullptr);
+        }
+    }
+
+    // function to draw the hangman
+    void printHangmanInternal(const int& jumlahKesalahan)
+    {
+        int s = jumlahKesalahan;
+        if (s < 0) s = 0; if (s > 6) s = 6;
+
+        static const std::vector<std::vector<std::string>> STAGES = {
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |       |    )",
+                R"( |       |    )",
+                R"( |            )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |      \|    )",
+                R"( |       |    )",
+                R"( |            )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |      \|/   )",
+                R"( |       |    )",
+                R"( |            )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |      \|/   )",
+                R"( |       |    )",
+                R"( |      /     )",
+                R"( |            )",
+                R"(_|___         )"
+            },
+            {
+                R"(  ________    )",
+                R"( |/      |    )",
+                R"( |       |    )",
+                R"( |      ( )   )",
+                R"( |      \|/   )",
+                R"( |       |    )",
+                R"( |      / \   )",
+                R"( |            )",
+                R"(_|___         )"
+            }
+        };
+
+        printBlockUnitCentered(STAGES[s], WHITE);
+    }
+
+    // function do draw the gameover hangman
+    void printHangmanGameOver()
+    {
+        std::vector<std::string> lines = {
+            R"(  ________    )",
+            R"( |/      |    )",
+            R"( |       |    )",
+            R"( |     (x_x)  )",
+            R"( |            )",
+            R"( |      /|\   )",
+            R"( |      / \   )",
+            R"( |     .:'::. )",
+            R"(_|___  ':' ':')",
+        };
+
+        int width = consoleWidth();
+        int leftPad = computeLeftPad(lines, width);
+        std::string indent(leftPad, ' ');
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const char* color = (i <= 4) ? WHITE : RED;
+            std::cout << color << indent << lines[i] << RESET << '\n';
+        }
+    }
+
+    // function to draw the winning hangman
+    void printHangmanWin()
+    {
+        std::vector<std::string> lines = {
+            R"(  ________    )",
+            R"( |/      |    )",
+            R"( |       |    )",
+            R"( |            )",
+            R"( |            )",
+            R"( |      ( )   )",
+            R"( |      \|/   )",
+            R"( |       |    )",
+            R"(_|___   / \   )"
+        };
+
+        int width = consoleWidth();
+        int leftPad = computeLeftPad(lines, width);
+        std::string indent(leftPad, ' ');
+        for (const auto& line : lines) {
+            std::cout << GREEN << indent << line << RESET << '\n';
+        }
+    }
+} // namespace
+
+// public function
+
+bool lastGameWon()
+{
+    return isLastGamewin;
+}
+
+void initializeConsole()
+{
+#ifdef _WIN32
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+    }
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    if (hIn != INVALID_HANDLE_VALUE) {
+        DWORD inMode = 0;
+        if (GetConsoleMode(hIn, &inMode)) { SetConsoleMode(hIn, inMode); }
+    }
+#endif
+}
 
 void initializeDatabase()
 {
-    sqlite3* db;
-    sqlite3_open(DB_PATH, &db); // open/create the database
+    sqlite3* db = nullptr;
+    std::string usedPath;
+    int rc = openDb(&db, usedPath);
+    if (rc != SQLITE_OK) {
+        std::cerr << RED << "Cannot open database: unable to open database file"
+                  << RESET << std::endl;
+        std::cerr << RED
+                  << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/' "
+                     "relatif terhadap executable."
+                  << RESET << std::endl;
+        std::this_thread::sleep_for(1s);
+        return;
+    }
 
-    const char* createDaftarKata = "CREATE TABLE IF NOT EXISTS DaftarKata("
-                                   "ID INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                   "Kata TEXT NOT NULL UNIQUE,"
-                                   "Panjang INT NOT NULL);";
-    sqlite3_exec(db, createDaftarKata, nullptr, nullptr, nullptr);
-
-    const char* createLeaderboard = "CREATE TABLE IF NOT EXISTS Leaderboard("
-                                    "Nama TEXT PRIMARY KEY,"
-                                    "Skor INT NOT NULL);";
-    sqlite3_exec(db, createLeaderboard, nullptr, nullptr, nullptr);
-
+    importDb(db);
     sqlite3_close(db);
 }
 
 std::vector<scoreEntry> getLeaderboard()
 {
-    sqlite3* db;
-    sqlite3_open(DB_PATH, &db);
+    sqlite3* db = nullptr;
+    std::string usedPath;
+    if (openDb(&db, usedPath) != SQLITE_OK) { return {}; }
     std::vector<scoreEntry> leaderboard;
-    // sql query to select the top 6 entries from the descending leaderboard
     const char* sql
             = "SELECT Nama, Skor FROM Leaderboard ORDER BY Skor DESC LIMIT 6;";
-    sqlite3_stmt* stmt; // prepared statement
+    sqlite3_stmt* stmt = nullptr; // prepared statement
 
-    sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
-    // loop through each row and returns SQLITE_ROW
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_close(db);
+        return {};
+    }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        // fetch the value of the 1st column
         std::string nama
                 = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        // fetch the value of the 2nd column
         const int skor = sqlite3_column_int(stmt, 1);
         leaderboard.push_back({nama, skor});
     }
-    // cleaning up the resource used
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 
@@ -63,31 +406,32 @@ std::vector<scoreEntry> getLeaderboard()
 
 int updateScore(const std::string& nama, const int& skor)
 {
-    sqlite3* db;
-    sqlite3_open(DB_PATH, &db);
-    sqlite3_stmt* stmt;
+    sqlite3* db = nullptr;
+    std::string usedPath;
+    if (openDb(&db, usedPath) != SQLITE_OK) { return 0; }
+    sqlite3_stmt* stmt = nullptr;
 
-    // retrieve the already stored scores
     int skorLama = 0;
-    sqlite3_prepare_v2(db, "SELECT Skor FROM Leaderboard WHERE Nama = ?;", -1,
-                       &stmt, nullptr); // sql query to  retrieve the scores
-    sqlite3_bind_text(stmt, 1, nama.c_str(), -1, SQLITE_STATIC);
-    // if there are match for the player name, retrieve the score
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        skorLama = sqlite3_column_int(stmt, 0);
+    if (sqlite3_prepare_v2(db, "SELECT Skor FROM Leaderboard WHERE Nama = ?;",
+                           -1, &stmt, nullptr)
+        == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, nama.c_str(), -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            skorLama = sqlite3_column_int(stmt, 0);
+        }
     }
     sqlite3_finalize(stmt);
 
-    // accumulate the score
     const int skorBaru = skorLama + skor;
-    sqlite3_prepare_v2(
-            db,
-            "INSERT OR REPLACE INTO Leaderboard (Nama, Skor) VALUES (?, ?);",
-            -1, &stmt, nullptr); // sql query to insert a new name and score or
-                                 // replace with the new one
-    sqlite3_bind_text(stmt, 1, nama.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, skorBaru);
-    sqlite3_step(stmt);
+    if (sqlite3_prepare_v2(db,
+                           "INSERT OR REPLACE INTO Leaderboard (Nama, Skor) "
+                           "VALUES (?, ?);",
+                           -1, &stmt, nullptr)
+        == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, nama.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, skorBaru);
+        sqlite3_step(stmt);
+    }
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
@@ -95,8 +439,76 @@ int updateScore(const std::string& nama, const int& skor)
     return skorBaru;
 }
 
+std::string selectRandomWord(const int& level)
+{
+    sqlite3* db = nullptr;
+    std::string usedPath;
+    int rc = openDb(&db, usedPath);
+    if (rc != SQLITE_OK) {
+        std::cerr << RED << "Cannot open database: unable to open database file"
+                  << RESET << std::endl;
+        std::cerr << RED
+                  << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/' "
+                     "relatif terhadap executable."
+                  << RESET << std::endl;
+        std::this_thread::sleep_for(2s);
+        return "";
+    }
+
+    importDb(db);
+
+    std::vector<std::string> words;
+    std::string query;
+    switch (level) {
+    case 1:
+        query = "SELECT Kata FROM DaftarKata WHERE Panjang <= 6;";
+        break;
+    case 2:
+        query = "SELECT Kata FROM DaftarKata WHERE Panjang BETWEEN 7 AND 10;";
+        break;
+    case 3:
+        query = "SELECT Kata FROM DaftarKata WHERE Panjang > 10;";
+        break;
+    default:
+        query = "SELECT Kata FROM DaftarKata;";
+        break;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << RED
+                  << "Failed to prepare statement: " << sqlite3_errmsg(db)
+                  << RESET << std::endl;
+        sqlite3_close(db);
+        return "";
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* txt = sqlite3_column_text(stmt, 0);
+        if (txt != nullptr) {
+            words.emplace_back(reinterpret_cast<const char*>(txt));
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    if (words.empty()) {
+        std::cerr << RED
+                  << "Error: Tidak ada kata yang sesuai dengan tingkat "
+                     "kesulitan yang dipilih di database."
+                  << RESET << std::endl;
+        std::this_thread::sleep_for(1s);
+        return "";
+    }
+
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<size_t> dist(0, words.size() - 1);
+    return words[dist(gen)];
+}
+
 void clearTerminal()
-// clear terminal on both windows and linux
 {
 #ifdef _WIN32
     std::system("cls");
@@ -108,35 +520,40 @@ void clearTerminal()
 void displayMainMenu(const std::vector<scoreEntry>& leaderboard)
 {
     clearTerminal();
-    std::cout << "\n=========================================\n";
-    std::cout << "                 HANGMAN\n";
-    std::cout << "=========================================\n\n";
+    printCenteredBlock(TITLE_ASCII, MAGENTA);
+    std::cout << '\n';
 
     if (!leaderboard.empty()) {
-        std::cout << "--- Leaderboard (Top 6) ---\n";
+        std::cout << centerLine("--- Leaderboard (Top 6) ---") << '\n';
         for (const auto& entry: leaderboard) {
-            std::cout << "  " << entry.namaPemain << ": " << entry.skor
-                      << std::endl;
+            std::ostringstream row;
+            row << "  " << entry.namaPemain << ": " << entry.skor;
+            std::cout << GREEN << centerLine(row.str()) << RESET << '\n';
         }
-        std::cout << "---------------------------------\n\n";
+        std::cout << centerLine("---------------------------------") << "\n\n";
     }
 
-    std::cout << "  1. Mulai Permainan\n";
-    std::cout << "  2. Keluar\n\n";
-    std::cout << "Pilihan Anda (1-2): ";
+    std::cout << YELLOW << centerLine("1. Mulai Permainan") << RESET << '\n';
+    std::cout << YELLOW << centerLine("2. Keluar") << RESET << "\n\n";
+    printPrompt("Pilihan Anda (1-2): ");
 }
 
 std::string getUsername()
 {
     clearTerminal();
+    printCenteredBlock(TITLE_ASCII, MAGENTA);
     std::string nama;
     while (true) {
-        std::cout << "\nMasukkan username (satu kata, tanpa spasi): ";
+        std::cout << '\n';
+        printPrompt("Masukkan username (satu kata, tanpa spasi): ");
         std::cin >> nama;
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                        '\n'); // clear input buffer
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
         if (!nama.empty()) { return nama; }
-        std::cout << "Nama tidak boleh kosong. Coba lagi.\n";
+        std::cout << RED << centerLine("Nama tidak boleh kosong. Coba lagi.")
+                  << RESET << '\n';
+        std::this_thread::sleep_for(1s);
+        clearTerminal();
+        printCenteredBlock(TITLE_ASCII, CYAN);
     }
 }
 
@@ -144,218 +561,176 @@ int selectLevel()
 {
     while (true) {
         clearTerminal();
-        std::cout << "\n--- PILIH TINGKAT KESULITAN ---\n";
-        std::cout << "  1. Mudah (<7 huruf)\n";
-        std::cout << "  2. Sedang (7-10 huruf)\n";
-        std::cout << "  3. Sulit (>10 huruf)\n\n";
-        std::cout << "Pilihan Anda (1-3): ";
+        printCenteredBlock(TITLE_ASCII, MAGENTA);
+        std::cout << '\n';
+        std::cout << centerLine("--- PILIH TINGKAT KESULITAN ---") << '\n';
+        std::cout << YELLOW << centerLine("1. Mudah (<7 huruf)") << RESET
+                  << '\n';
+        std::cout << YELLOW << centerLine("2. Sedang (7-10 huruf)") << RESET
+                  << '\n';
+        std::cout << YELLOW << centerLine("3. Sulit (>10 huruf)") << RESET
+                  << "\n\n";
+        printPrompt("Pilihan Anda (1-3): ");
 
         int pilihan = 0;
         std::cin >> pilihan;
 
         if (std::cin.fail()) {
-            std::cin.clear(); // reset cin state
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                            '\n'); // clear input buffer
-            std::cout << "Input tidak valid. Masukkan angka.\n";
-            std::this_thread::sleep_for(1s); // jeda 1 deitk
-            continue; // restart the loop if the user input non-int
-        }
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                        '\n'); // clear input buffer
-        if (pilihan >= 1 && pilihan <= 3) { return pilihan; }
-        // prompt the user to input difficulty again if the user input is not
-        // valid
-        std::cout << "Pilihan tidak valid. Coba lagi.\n";
-        std::this_thread::sleep_for(1s); // jeda 1 deitk
-    }
-}
-
-int displayEndScreen(const std::string& username, const int& currentScore,
-                     const int& totalScore)
-{
-    std::cout << "\nTekan Enter untuk melanjutkan...";
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                    '\n'); // clear input buffer
-
-    while (true) {
-        clearTerminal();
-        std::cout << "\n--- PERMAINAN SELESAI ---\n";
-        std::cout << "Pemain: " << username << "\n";
-        std::cout << "Skor ronde ini: " << currentScore << '\n';
-        std::cout << "Skor Total Anda: " << totalScore << "\n\n";
-        std::cout << "  1. Main Lagi\n";
-        std::cout << "  2. Kembali ke Menu Utama\n\n";
-        std::cout << "Pilihan Anda (1-2): ";
-
-        int pilihan;
-        std::cin >> pilihan;
-
-        if (std::cin.fail()) {
             std::cin.clear();
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                            '\n'); // clear input buffer
-            std::cout << "Input tidak valid. Masukkan angka.\n";
-            std::this_thread::sleep_for(1s); // jeda 1 deitk
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            std::cout << '\n'
+                      << RED << centerLine("Input tidak valid. Masukkan angka.")
+                      << RESET << '\n';
+            std::this_thread::sleep_for(1s);
             continue;
         }
-
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                        '\n'); // clear input buffer
-        if (pilihan == 1) { return true; }
-        if (pilihan == 2) { return false; }
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        if (pilihan >= 1 && pilihan <= 3) { return pilihan; }
+        std::cout << '\n'
+                  << RED << centerLine("Pilihan tidak valid. Coba lagi.")
+                  << RESET << '\n';
+        std::this_thread::sleep_for(1s);
     }
-}
-
-std::string selectRandomWord(const int& level)
-{
-    sqlite3* db;
-    int rc = sqlite3_open(DB_PATH, &db);
-    if (rc != SQLITE_OK) {
-        std::cerr << "Cannot open database: " << sqlite3_errmsg(db)
-                  << std::endl;
-        std::cerr << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/'."
-                  << std::endl;
-        std::this_thread::sleep_for(3s);
-        return "";
-    }
-
-    std::vector<std::string> kataSesuaiLevel;
-    std::string sql_query;
-    // create sql query based on the selected difficulty
-    switch (level) {
-    case 1:
-        sql_query = "SELECT Kata FROM DaftarKata WHERE Panjang <= 6;";
-        break;
-    case 2:
-        sql_query = "SELECT Kata FROM DaftarKata WHERE Panjang >= 7 AND "
-                    "Panjang <= 10;";
-        break;
-    case 3:
-        sql_query = "SELECT Kata FROM DaftarKata WHERE Panjang > 10;";
-        break;
-    }
-
-    sqlite3_stmt* stmt;
-    rc = sqlite3_prepare_v2(db, sql_query.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db)
-                  << std::endl;
-        sqlite3_close(db);
-        std::this_thread::sleep_for(3s);
-        return "";
-    }
-
-    // loop the query and return the rows
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        kataSesuaiLevel.push_back(
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
-    }
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
-
-    if (kataSesuaiLevel.empty()) {
-        std::cerr << "Error: Tidak ada kata yang sesuai dengan tingkat "
-                     "kesulitan yang dipilih di database.\n";
-        std::this_thread::sleep_for(2s);
-        return ""; // throws error when there are no words filtered in
-                   // accordance to the selected difficulty
-    }
-
-    // select random word
-    std::mt19937 generator(std::random_device{}());
-    std::uniform_int_distribution<> distribution(0, kataSesuaiLevel.size() - 1);
-    return kataSesuaiLevel[distribution(generator)];
 }
 
 void printHangman(const int& jumlahKesalahan)
 {
-    std::cout << "  +---+\n";
-    std::cout << "  |   |\n";
-    std::cout << "  |   " << (jumlahKesalahan >= 1 ? "O" : "") << '\n';
-    std::cout << "  |  " << (jumlahKesalahan >= 3 ? "/" : " ")
-              << (jumlahKesalahan >= 2 ? "|" : "")
-              << (jumlahKesalahan >= 4 ? "\\" : "") << '\n';
-    std::cout << "  |  " << (jumlahKesalahan >= 5 ? "/" : "") << " "
-              << (jumlahKesalahan >= 6 ? "\\" : "") << '\n';
-    std::cout << "  |\n";
-    std::cout << "=========\n";
+    printHangmanInternal(jumlahKesalahan);
 }
 
 void displayGame(const std::string& progresTebakan,
                  const std::string& tebakanSalah, const int& jumlahKesalahan)
 {
     clearTerminal();
-    std::cout << "\n--- Hangman ---\n";
-    printHangman(jumlahKesalahan);
-    std::cout << "\nKata Rahasia: ";
-    // adjust the progresTebakan visual
+    printCenteredBlock(TITLE_ASCII, MAGENTA);
+    std::cout << '\n';
+    printHangmanInternal(jumlahKesalahan);
+    std::cout << '\n' << CYAN << centerLine("Kata Rahasia:") << RESET << '\n';
+    std::string visual;
     for (char c: progresTebakan) {
-        if (c == ' ') { std::cout << "  "; }
-        else {
-            std::cout << c << ' ';
-        }
+        visual += (c == ' ' ? "  " : std::string(1, c) + " ");
     }
-    std::cout << "\n\nTebakan Salah: " << tebakanSalah << std::endl;
-    std::cout << "Kesempatan tersisa: " << 6 - jumlahKesalahan << std::endl;
+    std::cout << BOLD << centerLine(visual) << RESET << '\n';
+    std::cout << '\n'
+              << RED
+              << centerLine(std::string("Tebakan Salah: ") + tebakanSalah)
+              << RESET << '\n';
+    std::ostringstream s;
+    s << "Kesempatan tersisa: " << (6 - jumlahKesalahan);
+    std::cout << YELLOW << centerLine(s.str()) << RESET << '\n';
+    std::cout << '\n';
+    printPrompt("Tebak satu huruf: ");
 }
 
 int playGame(const int& level)
 {
-    // variable initialization
     const std::string kataRahasia = selectRandomWord(level);
     if (kataRahasia.empty()) {
+        isLastGamewin = false;
         return 0;
-    } // if there are no string detected, return error
-    std::string progresTebakan = "";
-    std::string tebakanSalah = "";
-    std::string semuaTebakan = "";
+    }
+
+    std::string progresTebakan;
+    std::string tebakanSalah;
+    std::string semuaTebakan;
     int jumlahKesalahan = 0;
     constexpr int maksKesalahan = 6;
 
-    // game logic
     for (char c: kataRahasia) { progresTebakan += (c == ' ') ? ' ' : '_'; }
     while (jumlahKesalahan < maksKesalahan && progresTebakan != kataRahasia) {
         displayGame(progresTebakan, tebakanSalah, jumlahKesalahan);
-
-        // prompt the user to guess a char
-        std::cout << "\nTebak satu huruf: ";
         char tebakan = ' ';
         std::cin >> tebakan;
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(),
-                        '\n'); // clear input buffer
-        tebakan = std::tolower(tebakan); // ignore uppercase
-
-        // input validation
-        if (!std::isalpha(tebakan)
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        tebakan = std::tolower(static_cast<unsigned char>(tebakan));
+        if (!std::isalpha(static_cast<unsigned char>(tebakan))
             || semuaTebakan.find(tebakan) != std::string::npos) {
-            continue; // if it's not an alphabet or it's already inputted
-                      // before, then ignore
+            continue;
         }
-        semuaTebakan += tebakan; // add the user's guess
-
-        // processing the user's guess
+        semuaTebakan += tebakan;
         if (kataRahasia.find(tebakan) != std::string::npos) {
             for (size_t i = 0; i < kataRahasia.length(); ++i) {
                 if (kataRahasia[i] == tebakan) { progresTebakan[i] = tebakan; }
             }
-        } // if the guess is right, displays the correct location
+        }
         else {
             jumlahKesalahan++;
             tebakanSalah += std::string(1, tebakan) + ' ';
-        } // if the guess is wrong, increment the jumlahKesalahan and displays
-          // the wrong guess
+        }
     }
     displayGame(progresTebakan, tebakanSalah, jumlahKesalahan);
 
-    // check the loop termination condition
     if (progresTebakan == kataRahasia) {
-        // if the loop terminated because the guesses are correct, return score
-        std::cout << "\nSelamat! Anda berhasil menebak katanya!\n";
+        isLastGamewin = true;
+        std::cout << '\n'
+                  << GREEN
+                  << centerLine("Selamat! Anda berhasil menebak katanya!")
+                  << RESET << '\n';
         return (level * 10) + (6 - jumlahKesalahan);
     }
-    // if the loop terminated because the guesses are incorrect, return 0
-    std::cout << "\nGAME OVER! Anda gagal menebak katanya.\n";
-    std::cout << "Kata yang benar adalah: " << kataRahasia << std::endl;
+    isLastGamewin = false;
+    std::cout << '\n'
+              << RED << centerLine("GAME OVER! Anda gagal menebak katanya.")
+              << RESET << '\n';
+    std::cout << centerLine(std::string("Kata yang benar adalah: ")
+                            + kataRahasia)
+              << std::endl;
     return 0;
+}
+
+int displayEndScreen(const std::string& username, const int& currentScore,
+                     const int& totalScore)
+{
+    std::cout << "\nTekan Enter untuk melanjutkan...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    while (true) {
+        clearTerminal();
+        printCenteredBlock(TITLE_ASCII, lastGameWon() ? CYAN : RED);
+        std::cout << '\n';
+
+        if (!lastGameWon()) {
+            printHangmanGameOver();
+            std::cout << '\n';
+        }
+        else {
+            printHangmanWin();
+            std::cout << '\n';
+        }
+
+        std::cout << centerLine("--- PERMAINAN SELESAI ---") << '\n';
+        std::cout << centerLine(std::string("Pemain: ") + username) << '\n';
+        std::cout << centerLine(std::string("Skor ronde ini: ")
+                                + std::to_string(currentScore))
+                  << '\n';
+        std::cout << centerLine(std::string("Skor Total Anda: ")
+                                + std::to_string(totalScore))
+                  << "\n\n";
+        std::cout << YELLOW << centerLine("1. Main Lagi") << RESET << '\n';
+        std::cout << YELLOW << centerLine("2. Kembali ke Menu Utama") << RESET
+                  << "\n\n";
+        printPrompt("Pilihan Anda (1-2): ");
+
+        int pilihan;
+        std::cin >> pilihan;
+
+        if (std::cin.fail()) {
+            std::cin.clear();
+            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            std::cout << '\n'
+                      << RED << centerLine("Input tidak valid. Masukkan angka.")
+                      << RESET << '\n';
+            std::this_thread::sleep_for(1s);
+            continue;
+        }
+
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        if (pilihan == 1) { return true; }
+        if (pilihan == 2) { return false; }
+
+        std::cout << '\n'
+                  << RED << centerLine("Pilihan tidak valid. Coba lagi.")
+                  << RESET << '\n';
+        std::this_thread::sleep_for(1s);
+    }
 }

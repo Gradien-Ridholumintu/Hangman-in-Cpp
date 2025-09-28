@@ -15,10 +15,8 @@ void initializeDatabase();
 std::vector<scoreEntry> getLeaderboard();
 int updateScore(const std::string& nama, const int& skor);
 
-// UI bootstrap
-void initConsole();
-
 // UI function
+void initializeConsole();
 void clearTerminal();
 void displayMainMenu(const std::vector<scoreEntry>& leaderboard);
 std::string getUsername();
@@ -27,6 +25,7 @@ int displayEndScreen(const std::string& username, const int& currentScore,
                      const int& totalScore);
 
 // main function
+bool lastGameWon();
 int playGame(const int& level);
 std::string selectRandomWord(const int& level);
 void printHangman(const int& jumlahKesalahan);

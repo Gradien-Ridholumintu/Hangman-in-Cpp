@@ -7,6 +7,7 @@ using namespace std::chrono_literals;
 
 int main()
 {
+    initializeConsole();
     initializeDatabase();
     int gameState = 0; // 0 = Homescreen, 1 = Playing, 2 = Quitting
 
