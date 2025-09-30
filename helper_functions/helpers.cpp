@@ -17,9 +17,8 @@
 // for sleep
 using namespace std::chrono_literals;
 
+// anonymous namespace function
 namespace {
-    bool isLastGamewin = false; // track last game outcome
-
     // color helpers
     constexpr auto RESET = "\x1b[0m";
     constexpr auto BOLD = "\x1b[1m";
@@ -44,6 +43,7 @@ namespace {
         return WIDTH;
     }
 
+    // padding the string with spaces to center it
     std::string centerLine(const std::string& text, int width)
     {
         if (width <= 0) width = consoleWidth();
@@ -58,6 +58,7 @@ namespace {
         return centerLine(text, consoleWidth());
     }
 
+    // compute the number of spaces needed to center a block of text
     int computeLeftPad(const std::vector<std::string>& lines, int width)
     {
         size_t maxLen = 0;
@@ -67,6 +68,7 @@ namespace {
         return pad / 2;
     }
 
+    // print a block of text centered
     void printBlockUnitCentered(const std::vector<std::string>& lines,
                                 const char* color = RESET, int width = -1)
     {
@@ -78,6 +80,7 @@ namespace {
         }
     }
 
+    // split multiline string and prints it centered
     void printCenteredBlock(const std::string& block, const char* color = RESET,
                             int width = -1)
     {
@@ -88,12 +91,10 @@ namespace {
         printBlockUnitCentered(lines, color, width);
     }
 
+    // print a prompt centered
     void printPrompt(const std::string& text, const char* color = BOLD)
     {
-        int width = consoleWidth();
-        int left = (width - static_cast<int>(text.size())) / 2;
-        if (left < 0) left = 0;
-        std::cout << color << std::string(left, ' ') << text << RESET;
+        std::cout << color << centerLine(text) << RESET;
     }
 
     auto TITLE_ASCII =
@@ -157,6 +158,33 @@ namespace {
         return SQLITE_CANTOPEN;
     }
 
+    class DatabaseManager {
+    public:
+        DatabaseManager(): db(nullptr)
+        {
+            if (openDb(&db, path) != SQLITE_OK) {
+                std::cerr << RED << "Cannot open database." << RESET
+                          << std::endl;
+                if (db) {
+                    sqlite3_close(db);
+                    db = nullptr;
+                }
+            }
+        }
+
+        ~DatabaseManager()
+        {
+            if (db) { sqlite3_close(db); }
+        }
+
+        sqlite3* get() const { return db; }
+        bool isOpen() const { return db != nullptr; }
+
+    private:
+        sqlite3* db;
+        std::string path;
+    };
+
     void importDb(sqlite3* db)
     {
         const char* createDaftarKata = "CREATE TABLE IF NOT EXISTS DaftarKata("
@@ -195,10 +223,9 @@ namespace {
         }
     }
 
-    // function to draw the hangman
-    void printHangmanInternal(const int& jumlahKesalahan)
-    {
-        int s = jumlahKesalahan;
+    void printHangman(const int& jumlahKesalahan)
+{
+    int s = jumlahKesalahan;
         if (s < 0) s = 0; if (s > 6) s = 6;
 
         static const std::vector<std::vector<std::string>> STAGES = {
@@ -282,7 +309,7 @@ namespace {
         };
 
         printBlockUnitCentered(STAGES[s], WHITE);
-    }
+}
 
     // function do draw the gameover hangman
     void printHangmanGameOver()
@@ -323,21 +350,35 @@ namespace {
             R"(_|___   / \   )"
         };
 
-        int width = consoleWidth();
-        int leftPad = computeLeftPad(lines, width);
-        std::string indent(leftPad, ' ');
-        for (const auto& line : lines) {
-            std::cout << GREEN << indent << line << RESET << '\n';
+        printBlockUnitCentered(lines, GREEN);
+    }
+
+    void displayGame(const std::string& progresTebakan,
+                 const std::string& tebakanSalah, const int& jumlahKesalahan)
+    {
+        clearTerminal();
+        printCenteredBlock(TITLE_ASCII, MAGENTA);
+        std::cout << '\n';
+        printHangman(jumlahKesalahan);
+        std::cout << '\n' << CYAN << centerLine("Kata Rahasia:") << RESET << '\n';
+        std::string visual;
+        for (char c: progresTebakan) {
+            visual += (c == ' ' ? "  " : std::string(1, c) + " ");
         }
+        std::cout << BOLD << centerLine(visual) << RESET << '\n';
+        std::cout << '\n'
+                  << RED
+                  << centerLine(std::string("Tebakan Salah: ") + tebakanSalah)
+                  << RESET << '\n';
+        std::ostringstream s;
+        s << "Kesempatan tersisa: " << (6 - jumlahKesalahan);
+        std::cout << YELLOW << centerLine(s.str()) << RESET << '\n';
+        std::cout << '\n';
+        printPrompt("Tebak satu huruf: ");
     }
 } // namespace
 
 // public function
-
-bool lastGameWon()
-{
-    return isLastGamewin;
-}
 
 void initializeConsole()
 {
@@ -360,12 +401,8 @@ void initializeConsole()
 
 void initializeDatabase()
 {
-    sqlite3* db = nullptr;
-    std::string usedPath;
-    int rc = openDb(&db, usedPath);
-    if (rc != SQLITE_OK) {
-        std::cerr << RED << "Cannot open database: unable to open database file"
-                  << RESET << std::endl;
+    DatabaseManager dbManager;
+    if (!dbManager.isOpen()) {
         std::cerr << RED
                   << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/' "
                      "relatif terhadap executable."
@@ -373,42 +410,37 @@ void initializeDatabase()
         std::this_thread::sleep_for(1s);
         return;
     }
-
-    importDb(db);
-    sqlite3_close(db);
+    importDb(dbManager.get());
 }
 
 std::vector<scoreEntry> getLeaderboard()
 {
-    sqlite3* db = nullptr;
-    std::string usedPath;
-    if (openDb(&db, usedPath) != SQLITE_OK) { return {}; }
+    DatabaseManager dbManager;
+    if (!dbManager.isOpen()) { return {}; }
+
     std::vector<scoreEntry> leaderboard;
     const char* sql
             = "SELECT Nama, Skor FROM Leaderboard ORDER BY Skor DESC LIMIT 6;";
-    sqlite3_stmt* stmt = nullptr; // prepared statement
+    sqlite3_stmt* stmt = nullptr;
 
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        sqlite3_close(db);
-        return {};
-    }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        std::string nama
-                = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        const int skor = sqlite3_column_int(stmt, 1);
-        leaderboard.push_back({nama, skor});
+    if (sqlite3_prepare_v2(dbManager.get(), sql, -1, &stmt, nullptr)
+        == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string nama = reinterpret_cast<const char*>(
+                    sqlite3_column_text(stmt, 0));
+            const int skor = sqlite3_column_int(stmt, 1);
+            leaderboard.push_back({nama, skor});
+        }
     }
     sqlite3_finalize(stmt);
-    sqlite3_close(db);
-
     return leaderboard;
 }
 
 int updateScore(const std::string& nama, const int& skor)
 {
-    sqlite3* db = nullptr;
-    std::string usedPath;
-    if (openDb(&db, usedPath) != SQLITE_OK) { return 0; }
+    DatabaseManager dbManager;
+    if (!dbManager.isOpen()) { return 0; }
+    sqlite3* db = dbManager.get();
     sqlite3_stmt* stmt = nullptr;
 
     int skorLama = 0;
@@ -432,31 +464,18 @@ int updateScore(const std::string& nama, const int& skor)
         sqlite3_bind_int(stmt, 2, skorBaru);
         sqlite3_step(stmt);
     }
-
     sqlite3_finalize(stmt);
-    sqlite3_close(db);
-
     return skorBaru;
 }
 
 std::string selectRandomWord(const int& level)
 {
-    sqlite3* db = nullptr;
-    std::string usedPath;
-    int rc = openDb(&db, usedPath);
-    if (rc != SQLITE_OK) {
-        std::cerr << RED << "Cannot open database: unable to open database file"
-                  << RESET << std::endl;
-        std::cerr << RED
-                  << "Pastikan file 'hangman.db' ada di dalam folder 'sqlite/' "
-                     "relatif terhadap executable."
-                  << RESET << std::endl;
+    DatabaseManager dbManager;
+    if (!dbManager.isOpen()) {
         std::this_thread::sleep_for(2s);
         return "";
     }
-
-    importDb(db);
-
+    sqlite3* db = dbManager.get();
     std::vector<std::string> words;
     std::string query;
     switch (level) {
@@ -475,12 +494,11 @@ std::string selectRandomWord(const int& level)
     }
 
     sqlite3_stmt* stmt = nullptr;
-    rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr)
+        != SQLITE_OK) {
         std::cerr << RED
                   << "Failed to prepare statement: " << sqlite3_errmsg(db)
                   << RESET << std::endl;
-        sqlite3_close(db);
         return "";
     }
 
@@ -490,9 +508,7 @@ std::string selectRandomWord(const int& level)
             words.emplace_back(reinterpret_cast<const char*>(txt));
         }
     }
-
     sqlite3_finalize(stmt);
-    sqlite3_close(db);
 
     if (words.empty()) {
         std::cerr << RED
@@ -593,42 +609,10 @@ int selectLevel()
     }
 }
 
-void printHangman(const int& jumlahKesalahan)
-{
-    printHangmanInternal(jumlahKesalahan);
-}
-
-void displayGame(const std::string& progresTebakan,
-                 const std::string& tebakanSalah, const int& jumlahKesalahan)
-{
-    clearTerminal();
-    printCenteredBlock(TITLE_ASCII, MAGENTA);
-    std::cout << '\n';
-    printHangmanInternal(jumlahKesalahan);
-    std::cout << '\n' << CYAN << centerLine("Kata Rahasia:") << RESET << '\n';
-    std::string visual;
-    for (char c: progresTebakan) {
-        visual += (c == ' ' ? "  " : std::string(1, c) + " ");
-    }
-    std::cout << BOLD << centerLine(visual) << RESET << '\n';
-    std::cout << '\n'
-              << RED
-              << centerLine(std::string("Tebakan Salah: ") + tebakanSalah)
-              << RESET << '\n';
-    std::ostringstream s;
-    s << "Kesempatan tersisa: " << (6 - jumlahKesalahan);
-    std::cout << YELLOW << centerLine(s.str()) << RESET << '\n';
-    std::cout << '\n';
-    printPrompt("Tebak satu huruf: ");
-}
-
-int playGame(const int& level)
+std::pair<int, bool> playGame(const int& level)
 {
     const std::string kataRahasia = selectRandomWord(level);
-    if (kataRahasia.empty()) {
-        isLastGamewin = false;
-        return 0;
-    }
+    if (kataRahasia.empty()) { return {0, false}; }
 
     std::string progresTebakan;
     std::string tebakanSalah;
@@ -661,35 +645,33 @@ int playGame(const int& level)
     displayGame(progresTebakan, tebakanSalah, jumlahKesalahan);
 
     if (progresTebakan == kataRahasia) {
-        isLastGamewin = true;
         std::cout << '\n'
                   << GREEN
                   << centerLine("Selamat! Anda berhasil menebak katanya!")
                   << RESET << '\n';
-        return (level * 10) + (6 - jumlahKesalahan);
+        return {(level * 10) + (6 - jumlahKesalahan), true};
     }
-    isLastGamewin = false;
     std::cout << '\n'
               << RED << centerLine("GAME OVER! Anda gagal menebak katanya.")
               << RESET << '\n';
     std::cout << centerLine(std::string("Kata yang benar adalah: ")
                             + kataRahasia)
               << std::endl;
-    return 0;
+    return {0, false};
 }
 
 int displayEndScreen(const std::string& username, const int& currentScore,
-                     const int& totalScore)
+                     const int& totalScore, const bool& lastGameWon)
 {
     std::cout << "\nTekan Enter untuk melanjutkan...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
     while (true) {
         clearTerminal();
-        printCenteredBlock(TITLE_ASCII, lastGameWon() ? CYAN : RED);
+        printCenteredBlock(TITLE_ASCII, lastGameWon ? CYAN : RED);
         std::cout << '\n';
 
-        if (!lastGameWon()) {
+        if (!lastGameWon) {
             printHangmanGameOver();
             std::cout << '\n';
         }

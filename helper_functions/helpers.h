@@ -22,12 +22,8 @@ void displayMainMenu(const std::vector<scoreEntry>& leaderboard);
 std::string getUsername();
 int selectLevel();
 int displayEndScreen(const std::string& username, const int& currentScore,
-                     const int& totalScore);
+                     const int& totalScore, const bool& lastGameWon);
 
 // main function
-bool lastGameWon();
-int playGame(const int& level);
+std::pair<int, bool> playGame(const int& level);
 std::string selectRandomWord(const int& level);
-void printHangman(const int& jumlahKesalahan);
-void displayGame(const std::string& progresTebakan,
-                 const std::string& tebakanSalah, const int& jumlahKesalahan);

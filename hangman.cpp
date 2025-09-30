@@ -48,7 +48,9 @@ int main()
 
             while (mainLagi) { // Loop  jika user ingin bermain lagi
                 const int level = selectLevel();
-                int skorRonde = playGame(level);
+                const auto gameResult = playGame(level);
+                const auto skorRonde = gameResult.first;
+                const auto lastGameWon = gameResult.second;
                 int totalSkor = 0;
 
                 // update the score in the database
@@ -56,12 +58,8 @@ int main()
                     totalSkor = updateScore(username, skorRonde);
                 }
 
-                int pilihanEndScreen
-                        = displayEndScreen(username, skorRonde, totalSkor);
-                if (pilihanEndScreen == 1) { mainLagi = true; }
-                else {
-                    mainLagi = false;
-                }
+                mainLagi = displayEndScreen(username, skorRonde, totalSkor,
+                                            lastGameWon);
             }
             // back to main menu
             gameState = 0;
