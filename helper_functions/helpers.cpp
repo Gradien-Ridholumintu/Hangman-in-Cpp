@@ -94,7 +94,11 @@ namespace {
     // print a prompt centered
     void printPrompt(const std::string& text, const char* color = BOLD)
     {
-        std::cout << color << centerLine(text) << RESET;
+        const int width = consoleWidth();
+        const int text_size = static_cast<int>(text.size());
+        int left_padding = 0;
+        if (width > text_size) { left_padding = (width - text_size) / 2; }
+        std::cout << std::string(left_padding, ' ') << color << text << RESET;
     }
 
     auto TITLE_ASCII =
